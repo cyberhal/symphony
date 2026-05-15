@@ -13,6 +13,10 @@ tracker:
     - Canceled
     - Duplicate
     - Done
+filters:
+  labels:
+    whitelist: []
+    blacklist: []
 polling:
   interval_ms: 5000
 workspace:

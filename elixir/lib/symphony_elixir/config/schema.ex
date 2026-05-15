@@ -65,6 +65,59 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule LabelFilters do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+
+    @type t :: %__MODULE__{
+            whitelist: [String.t()],
+            blacklist: [String.t()]
+          }
+
+    embedded_schema do
+      field(:whitelist, {:array, :string}, default: [])
+      field(:blacklist, {:array, :string}, default: [])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:whitelist, :blacklist], empty_values: [])
+      |> update_change(:whitelist, &Schema.normalize_label_filter_values/1)
+      |> update_change(:blacklist, &Schema.normalize_label_filter_values/1)
+    end
+  end
+
+  defmodule Filters do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.LabelFilters
+
+    @primary_key false
+
+    @type t :: %__MODULE__{
+            labels: LabelFilters.t()
+          }
+
+    embedded_schema do
+      embeds_one(:labels, LabelFilters, on_replace: :update, defaults_to_struct: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [])
+      |> cast_embed(:labels, with: &LabelFilters.changeset/2)
+    end
+  end
+
   defmodule Polling do
     @moduledoc false
     use Ecto.Schema
@@ -267,6 +320,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:filters, Filters, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
@@ -351,6 +405,25 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  @doc false
+  @spec normalize_label_filter_values([String.t()] | nil) :: [String.t()]
+  def normalize_label_filter_values(nil), do: []
+
+  def normalize_label_filter_values(values) when is_list(values) do
+    values
+    |> Enum.map(&normalize_label_filter_value/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_label_filter_value(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_label_filter_value(value), do: value |> to_string() |> normalize_label_filter_value()
+
   defp changeset(attrs) do
     %__MODULE__{}
     |> cast(attrs, [])
@@ -359,6 +432,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:filters, with: &Filters.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)

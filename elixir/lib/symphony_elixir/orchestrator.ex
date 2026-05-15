@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, IssueFilter, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -356,6 +356,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, false)
 
+      !IssueFilter.eligible?(issue, Config.settings!().filters) ->
+        Logger.info("Issue no longer matches configured filters: #{issue_context(issue)} labels=#{inspect(issue.labels)}; stopping active agent")
+
+        terminate_running_issue(state, issue.id, false)
+
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
 
@@ -505,12 +510,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(_running_entry), do: nil
 
   defp terminate_task(pid) when is_pid(pid) do
-    case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
-      :ok ->
-        :ok
+    if Process.whereis(SymphonyElixir.TaskSupervisor) do
+      case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
+        :ok ->
+          :ok
 
-      {:error, :not_found} ->
+        {:error, :not_found} ->
+          Process.exit(pid, :shutdown)
+      end
+    else
+      if Process.alive?(pid) do
         Process.exit(pid, :shutdown)
+      end
     end
   end
 
@@ -601,7 +612,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       active_issue_state?(state_name, active_states) and
-      !terminal_issue_state?(state_name, terminal_states)
+      !terminal_issue_state?(state_name, terminal_states) and
+      IssueFilter.eligible?(issue, Config.settings!().filters)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false

@@ -558,6 +558,63 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "config parses label filters from workflow front matter" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_whitelist: ["Backend", " docs "],
+      label_filter_blacklist: ["Blocked", "no-agent"]
+    )
+
+    filters = Config.settings!().filters
+
+    assert filters.labels.whitelist == ["backend", "docs"]
+    assert filters.labels.blacklist == ["blocked", "no-agent"]
+  end
+
+  test "config rejects non-list label filters" do
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_whitelist: "backend")
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.whitelist"
+  end
+
+  test "label filters gate dispatch eligibility with whitelist blacklist and mixed labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_whitelist: ["backend"],
+      label_filter_blacklist: ["blocked"]
+    )
+
+    state = dispatch_test_state()
+
+    assert Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "allow-1", labels: ["backend"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "miss-1", labels: ["frontend"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "deny-1", labels: ["blocked"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "mixed-1", labels: ["backend", "blocked"]),
+             state
+           )
+  end
+
+  test "label filters are inactive when no whitelist or blacklist is configured" do
+    state = dispatch_test_state()
+
+    assert Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "unfiltered-1", labels: ["frontend"]),
+             state
+           )
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",
@@ -582,6 +639,99 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+  end
+
+  test "dispatch revalidation skips issue when refreshed labels no longer match filters" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_whitelist: ["backend"],
+      label_filter_blacklist: ["blocked"]
+    )
+
+    stale_issue = issue_fixture(id: "label-stale", labels: ["backend"])
+    refreshed_issue = issue_fixture(id: "label-stale", labels: ["backend", "blocked"])
+
+    fetcher = fn ["label-stale"] -> {:ok, [refreshed_issue]} end
+
+    assert {:skip, %Issue{} = skipped_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
+
+    assert skipped_issue.labels == ["backend", "blocked"]
+  end
+
+  test "reconcile stops running issue when refreshed labels miss whitelist" do
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_whitelist: ["backend"])
+
+    issue_id = "running-label-miss"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-1008",
+          issue: issue_fixture(id: issue_id, identifier: "MT-1008", state: "In Progress", labels: ["backend"]),
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refreshed_issue = issue_fixture(id: issue_id, identifier: "MT-1008", state: "In Progress", labels: ["frontend"])
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([refreshed_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+  end
+
+  test "reconcile stops running issue when refreshed labels hit blacklist" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_whitelist: ["backend"],
+      label_filter_blacklist: ["blocked"]
+    )
+
+    issue_id = "running-label-deny"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-1009",
+          issue: issue_fixture(id: issue_id, identifier: "MT-1009", state: "In Progress", labels: ["backend"]),
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refreshed_issue =
+      issue_fixture(id: issue_id, identifier: "MT-1009", state: "In Progress", labels: ["backend", "blocked"])
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([refreshed_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -1302,5 +1452,35 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp dispatch_test_state do
+    %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+  end
+
+  defp issue_fixture(attrs) when is_list(attrs) do
+    attrs = Map.new(attrs)
+    id = Map.get(attrs, :id, "issue-#{System.unique_integer([:positive])}")
+    identifier = Map.get(attrs, :identifier, String.upcase(id))
+
+    struct!(
+      Issue,
+      Map.merge(
+        %{
+          id: id,
+          identifier: identifier,
+          title: "Issue #{identifier}",
+          state: "Todo",
+          labels: []
+        },
+        attrs
+      )
+    )
   end
 end
