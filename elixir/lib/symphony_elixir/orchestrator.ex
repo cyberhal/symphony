@@ -49,7 +49,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
@@ -64,10 +64,36 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil
     }
 
-    run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+    if cleanup_terminal_workspaces_on_start?(opts) do
+      run_terminal_workspace_cleanup()
+    end
+
+    startup_poll_delay_ms =
+      if auto_poll_on_start?(opts) do
+        0
+      else
+        config.polling.interval_ms
+      end
+
+    state = schedule_tick(state, startup_poll_delay_ms)
 
     {:ok, state}
+  end
+
+  defp auto_poll_on_start?(opts) do
+    Keyword.get(
+      opts,
+      :auto_poll_on_start,
+      Application.get_env(:symphony_elixir, :orchestrator_auto_poll_on_start, true)
+    )
+  end
+
+  defp cleanup_terminal_workspaces_on_start?(opts) do
+    Keyword.get(
+      opts,
+      :cleanup_terminal_workspaces_on_start,
+      Application.get_env(:symphony_elixir, :orchestrator_cleanup_terminal_workspaces_on_start, true)
+    )
   end
 
   @impl true

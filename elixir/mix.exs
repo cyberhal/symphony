@@ -44,6 +44,7 @@ defmodule SymphonyElixir.MixProject do
         "test/support/test_support.exs"
       ],
       dialyzer: [
+        plt_core_path: "_build/dialyxir_core",
         plt_add_apps: [:mix]
       ],
       escript: escript(),

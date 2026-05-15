@@ -570,6 +570,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert filters.labels.blacklist == ["blocked", "no-agent"]
   end
 
+  test "schema normalizes nil and non-string label filter values" do
+    assert Config.Schema.normalize_label_filter_values(nil) == []
+    assert Config.Schema.normalize_label_filter_values([:Backend, 123, " "]) == ["backend", "123"]
+  end
+
   test "config rejects non-list label filters" do
     write_workflow_file!(Workflow.workflow_file_path(), label_filter_whitelist: "backend")
 
@@ -613,6 +618,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              issue_fixture(id: "unfiltered-1", labels: ["frontend"]),
              state
            )
+  end
+
+  test "issue filter treats missing filter configuration as inactive" do
+    assert SymphonyElixir.IssueFilter.eligible?(issue_fixture(id: "filterless-1", labels: ["frontend"]), nil)
+  end
+
+  test "label filters normalize issue labels and handle non-list labels" do
+    filters = %SymphonyElixir.Config.Schema.LabelFilters{
+      whitelist: ["backend"],
+      blacklist: ["blocked"]
+    }
+
+    assert SymphonyElixir.IssueFilter.labels_allowed?(
+             [" Backend ", :backend, "", "docs"],
+             filters
+           )
+
+    refute SymphonyElixir.IssueFilter.labels_allowed?("backend", filters)
+    assert SymphonyElixir.IssueFilter.labels_allowed?(nil, %SymphonyElixir.Config.Schema.LabelFilters{})
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do

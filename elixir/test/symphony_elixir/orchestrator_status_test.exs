@@ -798,12 +798,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator triggers an immediate poll cycle shortly after startup" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_api_token: "",
       poll_interval_ms: 5_000
     )
 
     orchestrator_name = Module.concat(__MODULE__, :ImmediateStartupOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, auto_poll_on_start: true)
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -848,9 +848,82 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms >= 0
   end
 
+  test "orchestrator can defer the startup poll when disabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "",
+      poll_interval_ms: 5_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :DeferredStartupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, auto_poll_on_start: false)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    state = :sys.get_state(pid)
+    next_poll_in_ms = state.next_poll_due_at_ms - System.monotonic_time(:millisecond)
+
+    refute state.poll_check_in_progress
+    assert is_integer(next_poll_in_ms)
+    assert next_poll_in_ms > 4_000
+    assert next_poll_in_ms <= 5_000
+  end
+
+  test "orchestrator can skip terminal workspace cleanup on startup" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-skip-startup-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_path = Path.join(test_root, "MT-DONE")
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_terminal_states: ["Done"],
+      workspace_root: test_root,
+      poll_interval_ms: 5_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{id: "done-issue", identifier: "MT-DONE", state: "Done"}
+    ])
+
+    File.mkdir_p!(workspace_path)
+
+    orchestrator_name = Module.concat(__MODULE__, :SkipStartupCleanupOrchestrator)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        auto_poll_on_start: false,
+        cleanup_terminal_workspaces_on_start: false
+      )
+
+    on_exit(fn ->
+      if is_nil(previous_memory_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
+      end
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    assert File.exists?(workspace_path)
+  end
+
   test "orchestrator poll cycle resets next refresh countdown after a check" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_api_token: "",
       poll_interval_ms: 50
     )
 
@@ -899,7 +972,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_api_token: "",
       codex_stall_timeout_ms: 1_000
     )
 
