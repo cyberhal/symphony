@@ -570,6 +570,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert filters.labels.denylist == ["blocked", "no-agent"]
   end
 
+  test "config rejects legacy label whitelist and blacklist keys" do
+    write_raw_workflow_file!("""
+    ---
+    tracker:
+      kind: memory
+    filters:
+      labels:
+        whitelist: [backend]
+        blacklist: [blocked]
+    ---
+
+    Prompt
+    """)
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.whitelist"
+    assert message =~ "use allowlist"
+    assert message =~ "filters.labels.blacklist"
+    assert message =~ "use denylist"
+  end
+
   test "schema normalizes nil and non-string label filter values" do
     assert Config.Schema.normalize_label_filter_values(nil) == []
     assert Config.Schema.normalize_label_filter_values([:Backend, 123, " "]) == ["backend", "123"]
@@ -818,11 +839,80 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end)
 
     send(pid, {:retry_issue, issue_id, retry_token})
-    Process.sleep(50)
 
-    state = :sys.get_state(pid)
-    refute MapSet.member?(state.claimed, issue_id)
-    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert_eventually(fn ->
+      state = :sys.get_state(pid)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+    end)
+  end
+
+  test "retry timer reuses one issue filter config snapshot for active retries" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      label_filter_allowlist: ["backend"]
+    )
+
+    issue_id = "retry-config-snapshot"
+    retry_token = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RetryConfigSnapshotOrchestrator)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      issue_fixture(id: issue_id, identifier: "MT-1011", state: "Todo", labels: ["backend"])
+    ])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        auto_poll_on_start: false,
+        cleanup_terminal_workspaces_on_start: false
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        :erlang.trace(pid, false, [:call])
+      end
+
+      :erlang.trace_pattern({Config, :settings!, 0}, false, [:local])
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 0)
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-1011",
+          error: "agent exited: :boom"
+        }
+      })
+    end)
+
+    :erlang.trace_pattern({Config, :settings!, 0}, true, [:local])
+    :erlang.trace(pid, true, [:call])
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+
+    assert_eventually(fn ->
+      state = :sys.get_state(pid)
+      assert %{^issue_id => %{attempt: 3}} = state.retry_attempts
+    end)
+
+    settings_calls = count_settings_trace_calls(pid)
+    assert settings_calls <= 5
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -1573,6 +1663,40 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         attrs
       )
     )
+  end
+
+  defp write_raw_workflow_file!(body) do
+    File.write!(Workflow.workflow_file_path(), body)
+
+    if Process.whereis(WorkflowStore) do
+      WorkflowStore.force_reload()
+    end
+
+    :ok
+  end
+
+  defp assert_eventually(fun, attempts \\ 20)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    fun.()
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  defp count_settings_trace_calls(pid, count \\ 0) do
+    receive do
+      {:trace, ^pid, :call, {Config, :settings!, []}} ->
+        count_settings_trace_calls(pid, count + 1)
+
+      _message ->
+        count_settings_trace_calls(pid, count)
+    after
+      0 -> count
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

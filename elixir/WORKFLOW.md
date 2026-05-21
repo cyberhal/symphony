@@ -15,8 +15,8 @@ tracker:
     - Done
 filters:
   labels:
-    whitelist: []
-    blacklist: []
+    allowlist: []
+    denylist: []
 polling:
   interval_ms: 5000
 workspace:

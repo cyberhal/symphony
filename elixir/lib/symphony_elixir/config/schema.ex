@@ -79,6 +79,13 @@ defmodule SymphonyElixir.Config.Schema do
             denylist: [String.t()]
           }
 
+    @legacy_key_replacements %{
+      "whitelist" => {:whitelist, "allowlist"},
+      "blacklist" => {:blacklist, "denylist"},
+      whitelist: {:whitelist, "allowlist"},
+      blacklist: {:blacklist, "denylist"}
+    }
+
     embedded_schema do
       field(:allowlist, {:array, :string}, default: [])
       field(:denylist, {:array, :string}, default: [])
@@ -88,8 +95,19 @@ defmodule SymphonyElixir.Config.Schema do
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, [:allowlist, :denylist], empty_values: [])
+      |> reject_legacy_keys(attrs)
       |> update_change(:allowlist, &Schema.normalize_label_filter_values/1)
       |> update_change(:denylist, &Schema.normalize_label_filter_values/1)
+    end
+
+    defp reject_legacy_keys(changeset, attrs) when is_map(attrs) do
+      attrs
+      |> Enum.reduce(changeset, fn {key, _value}, changeset_acc ->
+        case Map.get(@legacy_key_replacements, key) do
+          {field, replacement} -> add_error(changeset_acc, field, "is deprecated, use #{replacement}")
+          nil -> changeset_acc
+        end
+      end)
     end
   end
 

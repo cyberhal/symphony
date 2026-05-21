@@ -92,8 +92,8 @@ tracker:
   project_slug: "..."
 filters:
   labels:
-    whitelist: []
-    blacklist: []
+    allowlist: []
+    denylist: []
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -132,9 +132,9 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
-- `filters.labels.whitelist` and `filters.labels.blacklist` can split work within one Linear
-  project. When `whitelist` is non-empty, an issue must have at least one matching label. Any
-  matching `blacklist` label excludes the issue, including issues that also match the whitelist.
+- `filters.labels.allowlist` and `filters.labels.denylist` can split work within one Linear
+  project. When `allowlist` is non-empty, an issue must have at least one matching label. Any
+  matching `denylist` label excludes the issue, including issues that also match the allowlist.
   Labels are normalized case-insensitively, and empty lists preserve the default unfiltered behavior.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
