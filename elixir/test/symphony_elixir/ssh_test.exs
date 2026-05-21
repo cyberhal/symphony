@@ -117,7 +117,8 @@ defmodule SymphonyElixir.SSHTest do
     install_fake_ssh!(test_root, trace_file, """
     #!/bin/sh
     printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
-    printf 'ready\\n'
+    printf 'rea'
+    printf 'dy\\n'
     exit 0
     """)
 
@@ -125,8 +126,7 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:ok, port} = SSH.start_port("localhost", "printf ok")
     assert is_port(port)
-    assert_receive {^port, {:data, "ready\n"}}, 2_000
-    assert_receive {^port, {:exit_status, 0}}, 2_000
+    assert {"ready\n", 0} = collect_port_output(port)
 
     trace = File.read!(trace_file)
     assert trace =~ "-T localhost bash -lc"
@@ -182,6 +182,19 @@ defmodule SymphonyElixir.SSHTest do
 
     File.chmod!(fake_ssh, 0o755)
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
+  end
+
+  defp collect_port_output(port, output \\ "") do
+    receive do
+      {^port, {:data, chunk}} when is_binary(chunk) ->
+        collect_port_output(port, output <> chunk)
+
+      {^port, {:exit_status, status}} ->
+        {output, status}
+    after
+      2_000 ->
+        flunk("timed out waiting for SSH port output")
+    end
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

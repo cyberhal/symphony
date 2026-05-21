@@ -369,12 +369,12 @@ Fields:
 Fields:
 
 - `labels` (object, OPTIONAL)
-  - `whitelist` (list of strings, default `[]`)
-  - `blacklist` (list of strings, default `[]`)
+  - `allowlist` (list of strings, default `[]`)
+  - `denylist` (list of strings, default `[]`)
   - Labels are normalized by trimming whitespace and lowercasing.
-  - If `whitelist` is non-empty, an issue MUST have at least one matching label to be eligible.
-  - If `blacklist` matches any issue label, the issue MUST be ineligible even when it also matches
-    `whitelist`.
+  - If `allowlist` is non-empty, an issue MUST have at least one matching label to be eligible.
+  - If `denylist` matches any issue label, the issue MUST be ineligible even when it also matches
+    `allowlist`.
   - Empty lists preserve the default unfiltered behavior.
   - Changes SHOULD apply dynamically to future dispatch, retry, and active-run reconciliation.
 
@@ -591,8 +591,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
-- `filters.labels.whitelist`: list of strings, default `[]`
-- `filters.labels.blacklist`: list of strings, default `[]`
+- `filters.labels.allowlist`: list of strings, default `[]`
+- `filters.labels.denylist`: list of strings, default `[]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null

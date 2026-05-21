@@ -560,32 +560,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "config parses label filters from workflow front matter" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      label_filter_whitelist: ["Backend", " docs "],
-      label_filter_blacklist: ["Blocked", "no-agent"]
+      label_filter_allowlist: ["Backend", " docs "],
+      label_filter_denylist: ["Blocked", "no-agent"]
     )
 
     filters = Config.settings!().filters
 
-    assert filters.labels.whitelist == ["backend", "docs"]
-    assert filters.labels.blacklist == ["blocked", "no-agent"]
+    assert filters.labels.allowlist == ["backend", "docs"]
+    assert filters.labels.denylist == ["blocked", "no-agent"]
   end
 
   test "schema normalizes nil and non-string label filter values" do
     assert Config.Schema.normalize_label_filter_values(nil) == []
     assert Config.Schema.normalize_label_filter_values([:Backend, 123, " "]) == ["backend", "123"]
+    assert Config.Schema.normalize_label_filter_values([%{"name" => "backend"}]) == []
+  end
+
+  test "config rejects complex label filter values" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: [%{"name" => "backend"}]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.allowlist"
   end
 
   test "config rejects non-list label filters" do
-    write_workflow_file!(Workflow.workflow_file_path(), label_filter_whitelist: "backend")
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_allowlist: "backend")
 
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "filters.labels.whitelist"
+    assert message =~ "filters.labels.allowlist"
   end
 
-  test "label filters gate dispatch eligibility with whitelist blacklist and mixed labels" do
+  test "label filters gate dispatch eligibility with allowlist denylist and mixed labels" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      label_filter_whitelist: ["backend"],
-      label_filter_blacklist: ["blocked"]
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
     )
 
     state = dispatch_test_state()
@@ -611,7 +621,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            )
   end
 
-  test "label filters are inactive when no whitelist or blacklist is configured" do
+  test "label filters are inactive when no allowlist or denylist is configured" do
     state = dispatch_test_state()
 
     assert Orchestrator.should_dispatch_issue_for_test(
@@ -626,8 +636,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "label filters normalize issue labels and handle non-list labels" do
     filters = %SymphonyElixir.Config.Schema.LabelFilters{
-      whitelist: ["backend"],
-      blacklist: ["blocked"]
+      allowlist: ["backend"],
+      denylist: ["blocked"]
     }
 
     assert SymphonyElixir.IssueFilter.labels_allowed?(
@@ -667,8 +677,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "dispatch revalidation skips issue when refreshed labels no longer match filters" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      label_filter_whitelist: ["backend"],
-      label_filter_blacklist: ["blocked"]
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
     )
 
     stale_issue = issue_fixture(id: "label-stale", labels: ["backend"])
@@ -682,8 +692,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert skipped_issue.labels == ["backend", "blocked"]
   end
 
-  test "reconcile stops running issue when refreshed labels miss whitelist" do
-    write_workflow_file!(Workflow.workflow_file_path(), label_filter_whitelist: ["backend"])
+  test "reconcile stops running issue when refreshed labels miss allowlist" do
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_allowlist: ["backend"])
 
     issue_id = "running-label-miss"
 
@@ -718,10 +728,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Process.alive?(agent_pid)
   end
 
-  test "reconcile stops running issue when refreshed labels hit blacklist" do
+  test "reconcile stops running issue when refreshed labels hit denylist" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      label_filter_whitelist: ["backend"],
-      label_filter_blacklist: ["blocked"]
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
     )
 
     issue_id = "running-label-deny"
@@ -756,6 +766,63 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Map.has_key?(updated_state.running, issue_id)
     refute MapSet.member?(updated_state.claimed, issue_id)
     refute Process.alive?(agent_pid)
+  end
+
+  test "retry timer releases claim when refreshed labels miss allowlist" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      label_filter_allowlist: ["backend"]
+    )
+
+    issue_id = "retry-label-miss"
+    retry_token = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RetryLabelFilterOrchestrator)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      issue_fixture(id: issue_id, identifier: "MT-1010", state: "Todo", labels: ["frontend"])
+    ])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        auto_poll_on_start: false,
+        cleanup_terminal_workspaces_on_start: false
+      )
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 0)
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-1010",
+          error: "agent exited: :boom"
+        }
+      })
+    end)
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -1507,4 +1574,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
     )
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

@@ -16,23 +16,23 @@ defmodule SymphonyElixir.IssueFilter do
   @spec labels_allowed?([String.t()], LabelFilters.t()) :: boolean()
   def labels_allowed?(issue_labels, %LabelFilters{} = filters) when is_list(issue_labels) do
     issue_label_set = issue_labels |> normalize_labels() |> MapSet.new()
-    whitelist = MapSet.new(filters.whitelist)
-    blacklist = MapSet.new(filters.blacklist)
+    allowlist = MapSet.new(filters.allowlist)
+    denylist = MapSet.new(filters.denylist)
 
-    whitelist_matches?(issue_label_set, whitelist) and
-      not blacklist_matches?(issue_label_set, blacklist)
+    allowlist_matches?(issue_label_set, allowlist) and
+      not denylist_matches?(issue_label_set, denylist)
   end
 
   def labels_allowed?(_issue_labels, %LabelFilters{} = filters) do
     labels_allowed?([], filters)
   end
 
-  defp whitelist_matches?(issue_labels, whitelist) do
-    MapSet.size(whitelist) == 0 or not MapSet.disjoint?(issue_labels, whitelist)
+  defp allowlist_matches?(issue_labels, allowlist) do
+    MapSet.size(allowlist) == 0 or not MapSet.disjoint?(issue_labels, allowlist)
   end
 
-  defp blacklist_matches?(issue_labels, blacklist) do
-    not MapSet.disjoint?(issue_labels, blacklist)
+  defp denylist_matches?(issue_labels, denylist) do
+    not MapSet.disjoint?(issue_labels, denylist)
   end
 
   defp normalize_labels(labels) do

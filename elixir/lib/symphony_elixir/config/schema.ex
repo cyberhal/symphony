@@ -75,21 +75,21 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
 
     @type t :: %__MODULE__{
-            whitelist: [String.t()],
-            blacklist: [String.t()]
+            allowlist: [String.t()],
+            denylist: [String.t()]
           }
 
     embedded_schema do
-      field(:whitelist, {:array, :string}, default: [])
-      field(:blacklist, {:array, :string}, default: [])
+      field(:allowlist, {:array, :string}, default: [])
+      field(:denylist, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:whitelist, :blacklist], empty_values: [])
-      |> update_change(:whitelist, &Schema.normalize_label_filter_values/1)
-      |> update_change(:blacklist, &Schema.normalize_label_filter_values/1)
+      |> cast(attrs, [:allowlist, :denylist], empty_values: [])
+      |> update_change(:allowlist, &Schema.normalize_label_filter_values/1)
+      |> update_change(:denylist, &Schema.normalize_label_filter_values/1)
     end
   end
 
@@ -422,7 +422,13 @@ defmodule SymphonyElixir.Config.Schema do
     |> String.downcase()
   end
 
-  defp normalize_label_filter_value(value), do: value |> to_string() |> normalize_label_filter_value()
+  defp normalize_label_filter_value(value) when is_atom(value) or is_number(value) do
+    value
+    |> to_string()
+    |> normalize_label_filter_value()
+  end
+
+  defp normalize_label_filter_value(_value), do: ""
 
   defp changeset(attrs) do
     %__MODULE__{}
