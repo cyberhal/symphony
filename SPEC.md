@@ -328,6 +328,7 @@ Returned workflow object:
 Top-level keys:
 
 - `tracker`
+- `filters`
 - `polling`
 - `workspace`
 - `hooks`
@@ -363,7 +364,21 @@ Fields:
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
-#### 5.3.2 `polling` (object)
+#### 5.3.2 `filters` (object)
+
+Fields:
+
+- `labels` (object, OPTIONAL)
+  - `allowlist` (list of strings, default `[]`)
+  - `denylist` (list of strings, default `[]`)
+  - Labels are normalized by trimming whitespace and lowercasing.
+  - If `allowlist` is non-empty, an issue MUST have at least one matching label to be eligible.
+  - If `denylist` matches any issue label, the issue MUST be ineligible even when it also matches
+    `allowlist`.
+  - Empty lists preserve the default unfiltered behavior.
+  - Changes SHOULD apply dynamically to future dispatch, retry, and active-run reconciliation.
+
+#### 5.3.3 `polling` (object)
 
 Fields:
 
@@ -371,7 +386,7 @@ Fields:
   - Default: `30000`
   - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.3 `workspace` (object)
+#### 5.3.4 `workspace` (object)
 
 Fields:
 
@@ -381,7 +396,7 @@ Fields:
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
 
-#### 5.3.4 `hooks` (object)
+#### 5.3.5 `hooks` (object)
 
 Fields:
 
@@ -405,7 +420,7 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.6 `agent` (object)
 
 Fields:
 
@@ -424,7 +439,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.7 `codex` (object)
 
 Fields:
 
@@ -576,6 +591,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `filters.labels.allowlist`: list of strings, default `[]`
+- `filters.labels.denylist`: list of strings, default `[]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -680,7 +697,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
 
 - `Reconciliation State Refresh`
-  - Stop runs whose issue states are terminal or no longer active.
+  - Stop runs whose issue states are terminal, no longer active, or no longer match configured issue
+    filters.
 
 - `Stall Timeout`
   - Kill worker and schedule retry.
@@ -720,6 +738,7 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- It matches all configured issue filters.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1755,6 +1774,8 @@ function reconcile_running_issues(state):
   for issue in refreshed:
     if issue.state in terminal_states:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
+    else if issue does not match configured issue filters:
+      state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
     else if issue.state in active_states:
       state.running[issue.id].issue = issue
     else:
@@ -1900,6 +1921,10 @@ on_retry_timer(issue_id, state):
 
   issue = find_by_id(candidates, issue_id)
   if issue is null:
+    state.claimed.remove(issue_id)
+    return state
+
+  if issue does not match configured issue filters:
     state.claimed.remove(issue_id)
     return state
 

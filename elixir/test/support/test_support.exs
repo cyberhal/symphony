@@ -70,7 +70,13 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+    children =
+      case Process.whereis(SymphonyElixir.Supervisor) do
+        nil -> []
+        _pid -> Supervisor.which_children(SymphonyElixir.Supervisor)
+      end
+
+    case Enum.find(children, fn
            {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
            _child -> false
          end) do
@@ -99,6 +105,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_assignee: nil,
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
+          label_filter_allowlist: nil,
+          label_filter_denylist: nil,
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
@@ -136,6 +144,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
+    label_filter_allowlist = Keyword.get(config, :label_filter_allowlist)
+    label_filter_denylist = Keyword.get(config, :label_filter_denylist)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
@@ -174,6 +184,7 @@ defmodule SymphonyElixir.TestSupport do
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        filters_yaml(label_filter_allowlist, label_filter_denylist),
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
@@ -252,6 +263,18 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp filters_yaml(nil, nil), do: nil
+
+  defp filters_yaml(label_allowlist, label_denylist) do
+    [
+      "filters:",
+      "  labels:",
+      "    allowlist: #{yaml_value(label_allowlist || [])}",
+      "    denylist: #{yaml_value(label_denylist || [])}"
+    ]
     |> Enum.join("\n")
   end
 

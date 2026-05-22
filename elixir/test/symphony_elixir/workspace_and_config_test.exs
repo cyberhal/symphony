@@ -558,6 +558,118 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "config parses label filters from workflow front matter" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: ["Backend", " docs "],
+      label_filter_denylist: ["Blocked", "no-agent"]
+    )
+
+    filters = Config.settings!().filters
+
+    assert filters.labels.allowlist == ["backend", "docs"]
+    assert filters.labels.denylist == ["blocked", "no-agent"]
+  end
+
+  test "config rejects legacy label whitelist and blacklist keys" do
+    write_raw_workflow_file!("""
+    ---
+    tracker:
+      kind: memory
+    filters:
+      labels:
+        whitelist: [backend]
+        blacklist: [blocked]
+    ---
+
+    Prompt
+    """)
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.whitelist"
+    assert message =~ "use allowlist"
+    assert message =~ "filters.labels.blacklist"
+    assert message =~ "use denylist"
+  end
+
+  test "schema normalizes nil and non-string label filter values" do
+    assert Config.Schema.normalize_label_filter_values(nil) == []
+    assert Config.Schema.normalize_label_filter_values([:Backend, 123, " "]) == ["backend", "123"]
+    assert Config.Schema.normalize_label_filter_values([%{"name" => "backend"}]) == []
+  end
+
+  test "config rejects complex label filter values" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: [%{"name" => "backend"}]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.allowlist"
+  end
+
+  test "config rejects non-list label filters" do
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_allowlist: "backend")
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "filters.labels.allowlist"
+  end
+
+  test "label filters gate dispatch eligibility with allowlist denylist and mixed labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
+    )
+
+    state = dispatch_test_state()
+
+    assert Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "allow-1", labels: ["backend"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "miss-1", labels: ["frontend"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "deny-1", labels: ["blocked"]),
+             state
+           )
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "mixed-1", labels: ["backend", "blocked"]),
+             state
+           )
+  end
+
+  test "label filters are inactive when no allowlist or denylist is configured" do
+    state = dispatch_test_state()
+
+    assert Orchestrator.should_dispatch_issue_for_test(
+             issue_fixture(id: "unfiltered-1", labels: ["frontend"]),
+             state
+           )
+  end
+
+  test "issue filter treats missing filter configuration as inactive" do
+    assert SymphonyElixir.IssueFilter.eligible?(issue_fixture(id: "filterless-1", labels: ["frontend"]), nil)
+  end
+
+  test "label filters normalize issue labels and handle non-list labels" do
+    filters = %SymphonyElixir.Config.Schema.LabelFilters{
+      allowlist: ["backend"],
+      denylist: ["blocked"]
+    }
+
+    assert SymphonyElixir.IssueFilter.labels_allowed?(
+             [" Backend ", :backend, "", "docs"],
+             filters
+           )
+
+    refute SymphonyElixir.IssueFilter.labels_allowed?("backend", filters)
+    assert SymphonyElixir.IssueFilter.labels_allowed?(nil, %SymphonyElixir.Config.Schema.LabelFilters{})
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",
@@ -582,6 +694,225 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+  end
+
+  test "dispatch revalidation skips issue when refreshed labels no longer match filters" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
+    )
+
+    stale_issue = issue_fixture(id: "label-stale", labels: ["backend"])
+    refreshed_issue = issue_fixture(id: "label-stale", labels: ["backend", "blocked"])
+
+    fetcher = fn ["label-stale"] -> {:ok, [refreshed_issue]} end
+
+    assert {:skip, %Issue{} = skipped_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
+
+    assert skipped_issue.labels == ["backend", "blocked"]
+  end
+
+  test "reconcile stops running issue when refreshed labels miss allowlist" do
+    write_workflow_file!(Workflow.workflow_file_path(), label_filter_allowlist: ["backend"])
+
+    issue_id = "running-label-miss"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-1008",
+          issue: issue_fixture(id: issue_id, identifier: "MT-1008", state: "In Progress", labels: ["backend"]),
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refreshed_issue = issue_fixture(id: issue_id, identifier: "MT-1008", state: "In Progress", labels: ["frontend"])
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([refreshed_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+  end
+
+  test "reconcile stops running issue when refreshed labels hit denylist" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      label_filter_allowlist: ["backend"],
+      label_filter_denylist: ["blocked"]
+    )
+
+    issue_id = "running-label-deny"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-1009",
+          issue: issue_fixture(id: issue_id, identifier: "MT-1009", state: "In Progress", labels: ["backend"]),
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refreshed_issue =
+      issue_fixture(id: issue_id, identifier: "MT-1009", state: "In Progress", labels: ["backend", "blocked"])
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([refreshed_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+  end
+
+  test "retry timer releases claim when refreshed labels miss allowlist" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      label_filter_allowlist: ["backend"]
+    )
+
+    issue_id = "retry-label-miss"
+    retry_token = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RetryLabelFilterOrchestrator)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      issue_fixture(id: issue_id, identifier: "MT-1010", state: "Todo", labels: ["frontend"])
+    ])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        auto_poll_on_start: false,
+        cleanup_terminal_workspaces_on_start: false
+      )
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 0)
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-1010",
+          error: "agent exited: :boom"
+        }
+      })
+    end)
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+
+    assert_eventually(fn ->
+      state = :sys.get_state(pid)
+      refute MapSet.member?(state.claimed, issue_id)
+      refute Map.has_key?(state.retry_attempts, issue_id)
+    end)
+  end
+
+  test "retry timer reuses one issue filter config snapshot for active retries" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      label_filter_allowlist: ["backend"]
+    )
+
+    issue_id = "retry-config-snapshot"
+    retry_token = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RetryConfigSnapshotOrchestrator)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      issue_fixture(id: issue_id, identifier: "MT-1011", state: "Todo", labels: ["backend"])
+    ])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        auto_poll_on_start: false,
+        cleanup_terminal_workspaces_on_start: false
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        :erlang.trace(pid, false, [:call])
+      end
+
+      :erlang.trace_pattern({Config, :settings!, 0}, false, [:local])
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 0)
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-1011",
+          error: "agent exited: :boom"
+        }
+      })
+    end)
+
+    :erlang.trace_pattern({Config, :settings!, 0}, true, [:local])
+    :erlang.trace(pid, true, [:call])
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+
+    assert_eventually(fn ->
+      state = :sys.get_state(pid)
+      assert %{^issue_id => %{attempt: 3}} = state.retry_attempts
+    end)
+
+    settings_calls = count_settings_trace_calls(pid)
+    assert settings_calls <= 5
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -1303,4 +1634,71 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp dispatch_test_state do
+    %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+  end
+
+  defp issue_fixture(attrs) when is_list(attrs) do
+    attrs = Map.new(attrs)
+    id = Map.get(attrs, :id, "issue-#{System.unique_integer([:positive])}")
+    identifier = Map.get(attrs, :identifier, String.upcase(id))
+
+    struct!(
+      Issue,
+      Map.merge(
+        %{
+          id: id,
+          identifier: identifier,
+          title: "Issue #{identifier}",
+          state: "Todo",
+          labels: []
+        },
+        attrs
+      )
+    )
+  end
+
+  defp write_raw_workflow_file!(body) do
+    File.write!(Workflow.workflow_file_path(), body)
+
+    if Process.whereis(WorkflowStore) do
+      WorkflowStore.force_reload()
+    end
+
+    :ok
+  end
+
+  defp assert_eventually(fun, attempts \\ 20)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    fun.()
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  defp count_settings_trace_calls(pid, count \\ 0) do
+    receive do
+      {:trace, ^pid, :call, {Config, :settings!, []}} ->
+        count_settings_trace_calls(pid, count + 1)
+
+      _message ->
+        count_settings_trace_calls(pid, count)
+    after
+      0 -> count
+    end
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

@@ -90,6 +90,10 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+filters:
+  labels:
+    allowlist: []
+    denylist: []
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -128,6 +132,10 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `filters.labels.allowlist` and `filters.labels.denylist` can split work within one Linear
+  project. When `allowlist` is non-empty, an issue must have at least one matching label. Any
+  matching `denylist` label excludes the issue, including issues that also match the allowlist.
+  Labels are normalized case-insensitively, and empty lists preserve the default unfiltered behavior.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
